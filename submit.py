@@ -3,36 +3,43 @@ import sys, os
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 """
-Codeforces Submit Tool (Playwright Edition)
-============================================
-Submit solutions to Codeforces using a real browser — bypasses Cloudflare.
+Codeforces Submit Tool
+======================
+Submit solutions to Codeforces from the terminal.
 
 Usage:
-    py submit.py <filename>
-    py submit.py 112A.py
-    py submit.py --login          (to log in and save session)
+    py submit.py <filename>       Submit a solution
+    py submit.py 112A.py          Example
+
+How it works:
+    1. Copies your source code to clipboard
+    2. Opens the Codeforces submit page in your browser
+    3. You paste the code and click Submit
+    4. The tool auto-polls for the verdict and shows results
 """
 
 import re
 import json
 import time
+import subprocess
+import webbrowser
+import urllib.request
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 HANDLE = "nan_x3"
 CODEFORCES_URL = "https://codeforces.com"
-SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cf_session.json")
 
-# Codeforces language IDs
-LANG_MAP = {
-    ".py":   70,   # PyPy 3-64
-    ".cpp":  89,   # GNU C++20 (64 bit)
-    ".c":    43,   # GNU GCC C11 5.1.0
-    ".java": 87,   # Java 21
-    ".js":   55,   # Node.js
-    ".rs":   75,   # Rust 2021
-    ".kt":   88,   # Kotlin 1.9
-    ".go":   32,   # Go
+# Codeforces language names (for display only)
+LANG_NAMES = {
+    ".py":   "PyPy 3-64 (or Python 3)",
+    ".cpp":  "GNU C++20 (64 bit)",
+    ".c":    "GNU GCC C11",
+    ".java": "Java 21",
+    ".js":   "Node.js",
+    ".rs":   "Rust 2021",
+    ".kt":   "Kotlin 1.9",
+    ".go":   "Go",
 }
 
 # Terminal colours
@@ -59,219 +66,51 @@ def parse_filename(filename):
     return match.group(1), match.group(2).upper()
 
 
-def get_lang_id(filename):
-    """Get Codeforces language ID from file extension"""
+def get_lang_name(filename):
+    """Get language name from file extension"""
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in LANG_MAP:
-        print(f"{C.RED}X Unsupported extension: {ext}{C.RESET}")
-        print(f"  Supported: {', '.join(LANG_MAP.keys())}")
-        sys.exit(1)
-    return LANG_MAP[ext]
+    return LANG_NAMES.get(ext, "Unknown")
 
 
-def get_lang_name(lang_id):
-    """Human-readable name for a language ID"""
-    names = {70: "PyPy 3-64", 89: "C++20", 43: "C11", 87: "Java 21",
-             55: "Node.js", 75: "Rust", 88: "Kotlin", 32: "Go"}
-    return names.get(lang_id, str(lang_id))
+def copy_to_clipboard(text):
+    """Copy text to Windows clipboard"""
+    process = subprocess.Popen(["clip"], stdin=subprocess.PIPE)
+    process.communicate(text.encode("utf-16-le"))
 
 
-# ─── LOGIN ───────────────────────────────────────────────────────────────────
-
-def do_login(playwright):
-    """Interactive login — opens a visible browser so you can solve Cloudflare"""
-    print(f"\n{C.CYAN}Opening browser for Codeforces login...{C.RESET}")
-    print(f"{C.DIM}  A browser window will open. Log in normally.{C.RESET}")
-    print(f"{C.DIM}  If there's a Cloudflare challenge, solve it.{C.RESET}")
-    print(f"{C.DIM}  The window will close automatically once logged in.{C.RESET}\n")
-
-    browser = playwright.chromium.launch(headless=False)
-    context = browser.new_context()
-    page = context.new_page()
-
-    page.goto(f"{CODEFORCES_URL}/enter", timeout=60000)
-    page.wait_for_load_state("domcontentloaded")
-
-    # Pre-fill the handle
+def get_latest_submission_id():
+    """Get the ID of the latest submission before we submit"""
     try:
-        page.fill("#handleOrEmail", HANDLE)
+        api_url = f"{CODEFORCES_URL}/api/user.status?handle={HANDLE}&from=1&count=1"
+        req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        if data.get("status") == "OK" and data.get("result"):
+            return data["result"][0].get("id", 0)
     except Exception:
         pass
-
-    # Wait for user to log in (check for handle appearing on page)
-    print(f"{C.YELLOW}Waiting for you to log in...{C.RESET}")
-
-    for _ in range(300):  # 5 minutes max
-        time.sleep(1)
-        try:
-            content = page.content()
-            if f'handle = "{HANDLE}"' in content or f"/{HANDLE}" in page.url:
-                break
-            # Check if we're on the main page and logged in
-            if page.url == f"{CODEFORCES_URL}/" or page.url == f"{CODEFORCES_URL}":
-                if HANDLE.lower() in content.lower():
-                    break
-        except Exception:
-            continue
-    else:
-        print(f"{C.RED}X Login timed out.{C.RESET}")
-        browser.close()
-        sys.exit(1)
-
-    # Save session cookies
-    cookies = context.cookies()
-    with open(SESSION_FILE, "w") as f:
-        json.dump(cookies, f, indent=2)
-
-    print(f"{C.GREEN}Login successful! Session saved.{C.RESET}")
-    browser.close()
-
-
-# ─── SUBMIT ──────────────────────────────────────────────────────────────────
-
-def do_submit(playwright, filename, contest_id, problem_index, source_code, lang_id):
-    """Submit solution using saved session cookies"""
-
-    if not os.path.exists(SESSION_FILE):
-        print(f"{C.RED}X No saved session found. Run 'py submit.py --login' first.{C.RESET}")
-        sys.exit(1)
-
-    with open(SESSION_FILE, "r") as f:
-        cookies = json.load(f)
-
-    # Launch headless browser
-    browser = playwright.chromium.launch(headless=True)
-    context = browser.new_context()
-    context.add_cookies(cookies)
-    page = context.new_page()
-
-    # Navigate to submit page
-    print(f"{C.CYAN}-> Opening submit page...{C.RESET}")
-    submit_url = f"{CODEFORCES_URL}/contest/{contest_id}/submit"
-    page.goto(submit_url, timeout=60000)
-    page.wait_for_load_state("domcontentloaded")
-
-    # Check if we're logged in
-    content = page.content()
-    if "Enter" in page.title() or "/enter" in page.url:
-        print(f"{C.RED}X Session expired. Run 'py submit.py --login' to re-login.{C.RESET}")
-        browser.close()
-        sys.exit(1)
-
-    # Check for Cloudflare challenge
-    if len(content) < 2000 and ("challenge" in content.lower() or "cloudflare" in content.lower()):
-        print(f"{C.YELLOW}Cloudflare challenge detected. Re-login needed.{C.RESET}")
-        print(f"Run: py submit.py --login")
-        browser.close()
-        sys.exit(1)
-
-    print(f"  {C.GREEN}OK Logged in{C.RESET}")
-
-    # Fill the submission form
-    print(f"{C.CYAN}-> Filling submission form...{C.RESET}")
-
-    try:
-        # Select problem index
-        problem_selector = page.locator('select[name="submittedProblemIndex"]')
-        if problem_selector.count() > 0:
-            problem_selector.select_option(problem_index)
-
-        # Select language
-        page.locator('select[name="programTypeId"]').select_option(str(lang_id))
-
-        # Toggle to paste source code instead of file upload
-        toggle = page.locator("#toggleEditorCheckbox")
-        if toggle.count() > 0 and not toggle.is_checked():
-            toggle.click()
-            page.wait_for_timeout(500)
-
-        # Try to paste source code into the editor
-        # Codeforces uses either a textarea or an ACE/CodeMirror editor
-        source_textarea = page.locator("#sourceCodeTextarea")
-        if source_textarea.count() > 0:
-            source_textarea.fill(source_code)
-        else:
-            # Try file upload as fallback
-            file_input = page.locator('input[name="sourceFile"]')
-            if file_input.count() > 0:
-                # Write source to a temp file and upload
-                temp_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp_submit" + os.path.splitext(filename)[1])
-                with open(temp_file, "w", encoding="utf-8") as f:
-                    f.write(source_code)
-                file_input.set_input_files(temp_file)
-                # Clean up later
-            else:
-                print(f"{C.RED}X Could not find source code input on page.{C.RESET}")
-                browser.close()
-                sys.exit(1)
-
-    except Exception as e:
-        print(f"{C.RED}X Error filling form: {e}{C.RESET}")
-        browser.close()
-        sys.exit(1)
-
-    print(f"  {C.GREEN}OK Form filled{C.RESET}")
-
-    # Click submit
-    print(f"{C.CYAN}-> Submitting...{C.RESET}")
-    try:
-        submit_btn = page.locator('input.submit[type="submit"], input[value="Submit"]')
-        submit_btn.click()
-        page.wait_for_load_state("domcontentloaded")
-        page.wait_for_timeout(3000)
-    except Exception as e:
-        print(f"{C.RED}X Error clicking submit: {e}{C.RESET}")
-        browser.close()
-        sys.exit(1)
-
-    # Check result
-    current_url = page.url
-    page_content = page.content()
-
-    # Check for error messages
-    if "You have submitted exactly the same code before" in page_content:
-        print(f"{C.YELLOW}! You already submitted this exact code.{C.RESET}")
-        browser.close()
-        sys.exit(1)
-
-    error_el = page.locator("span.error")
-    if error_el.count() > 0:
-        err_text = error_el.first.inner_text()
-        if err_text.strip():
-            print(f"{C.RED}X Submit error: {err_text}{C.RESET}")
-            browser.close()
-            sys.exit(1)
-
-    if "/my" in current_url or "/status" in current_url:
-        print(f"  {C.GREEN}OK Solution submitted!{C.RESET}")
-    else:
-        print(f"  {C.YELLOW}! Submission may have succeeded (URL: {current_url}){C.RESET}")
-
-    # Save updated cookies
-    cookies = context.cookies()
-    with open(SESSION_FILE, "w") as f:
-        json.dump(cookies, f, indent=2)
-
-    browser.close()
-
-    # Clean up temp file
-    temp_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp_submit" + os.path.splitext(filename)[1])
-    if os.path.exists(temp_file):
-        os.remove(temp_file)
-
-    return True
+    return 0
 
 
 # ─── VERDICT ─────────────────────────────────────────────────────────────────
 
-def poll_verdict(contest_id):
-    """Poll the Codeforces API for the latest submission verdict"""
-    import urllib.request
+VERDICT_COLORS = {
+    "OK": C.GREEN, "ACCEPTED": C.GREEN,
+    "WRONG_ANSWER": C.RED, "TIME_LIMIT_EXCEEDED": C.RED,
+    "MEMORY_LIMIT_EXCEEDED": C.RED, "RUNTIME_ERROR": C.RED,
+    "COMPILATION_ERROR": C.RED, "PRESENTATION_ERROR": C.RED,
+    "IDLENESS_LIMIT_EXCEEDED": C.RED, "CHALLENGED": C.RED,
+    "TESTING": C.YELLOW,
+}
 
+
+def poll_verdict(contest_id, old_submission_id):
+    """Poll the Codeforces API until a new submission verdict appears"""
     api_url = f"{CODEFORCES_URL}/api/user.status?handle={HANDLE}&from=1&count=5"
-    print(f"\n{C.CYAN}Waiting for verdict...{C.RESET}", end="", flush=True)
 
-    for attempt in range(60):
+    print(f"\n{C.CYAN}Waiting for new submission...{C.RESET}", end="", flush=True)
+
+    for attempt in range(120):  # Max 4 minutes
         time.sleep(2)
         try:
             req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -282,8 +121,14 @@ def poll_verdict(contest_id):
                 print(".", end="", flush=True)
                 continue
 
-            # Find submission for this contest
             for sub in data["result"]:
+                sub_id = sub.get("id", 0)
+
+                # Skip old submissions
+                if sub_id <= old_submission_id:
+                    continue
+
+                # Check if it's for the right contest
                 if str(sub.get("contestId")) != str(contest_id):
                     continue
 
@@ -291,10 +136,11 @@ def poll_verdict(contest_id):
 
                 if verdict == "TESTING":
                     tc = sub.get("passedTestCount", 0)
-                    print(f"\r{C.YELLOW}Testing... passed {tc} test(s)     {C.RESET}", end="", flush=True)
+                    print(f"\r{C.YELLOW}  Testing... passed {tc} test(s)        {C.RESET}", end="", flush=True)
                     break
                 else:
                     return sub
+
             else:
                 print(".", end="", flush=True)
 
@@ -307,7 +153,7 @@ def poll_verdict(contest_id):
 
 
 def display_verdict(sub):
-    """Display the verdict nicely"""
+    """Display the verdict"""
     verdict = sub.get("verdict", "UNKNOWN")
     time_ms = sub.get("timeConsumedMillis", 0)
     mem_bytes = sub.get("memoryConsumedBytes", 0)
@@ -321,7 +167,7 @@ def display_verdict(sub):
     lang = sub.get("programmingLanguage", "?")
 
     is_ok = verdict == "OK"
-    vc = C.GREEN if is_ok else C.RED if verdict != "TESTING" else C.YELLOW
+    vc = VERDICT_COLORS.get(verdict, C.YELLOW)
 
     print(f"\n")
     print(f"  {C.BOLD}{'=' * 56}{C.RESET}")
@@ -346,55 +192,68 @@ def display_verdict(sub):
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def main():
-    from playwright.sync_api import sync_playwright
-
     if len(sys.argv) < 2:
         print(f"{C.BOLD}Codeforces Submit Tool{C.RESET}")
         print(f"  py submit.py <filename>   Submit a solution")
-        print(f"  py submit.py --login      Log in to Codeforces")
+        print(f"  Example: py submit.py 112A.py")
         sys.exit(0)
 
-    with sync_playwright() as pw:
+    filename = sys.argv[1]
 
-        # Login mode
-        if sys.argv[1] == "--login":
-            do_login(pw)
-            return
+    if not os.path.exists(filename):
+        print(f"{C.RED}X File not found: {filename}{C.RESET}")
+        sys.exit(1)
 
-        filename = sys.argv[1]
+    contest_id, problem_index = parse_filename(filename)
+    lang_name = get_lang_name(filename)
 
-        if not os.path.exists(filename):
-            print(f"{C.RED}X File not found: {filename}{C.RESET}")
-            sys.exit(1)
+    with open(filename, "r", encoding="utf-8") as f:
+        source_code = f.read()
 
-        contest_id, problem_index = parse_filename(filename)
-        lang_id = get_lang_id(filename)
+    if not source_code.strip():
+        print(f"{C.RED}X File is empty!{C.RESET}")
+        sys.exit(1)
 
-        with open(filename, "r", encoding="utf-8") as f:
-            source_code = f.read()
+    # ─── Show info ───
+    print(f"\n{C.BOLD}{'-' * 56}{C.RESET}")
+    print(f"  {C.CYAN}Codeforces Submit{C.RESET}")
+    print(f"    File:     {filename}")
+    print(f"    Contest:  {contest_id}")
+    print(f"    Problem:  {problem_index}")
+    print(f"    Language: {lang_name}")
+    print(f"    Lines:    {len(source_code.splitlines())}")
+    print(f"{C.BOLD}{'-' * 56}{C.RESET}")
 
-        if not source_code.strip():
-            print(f"{C.RED}X File is empty!{C.RESET}")
-            sys.exit(1)
+    # ─── Get current latest submission ID (to detect new ones) ───
+    print(f"\n{C.CYAN}-> Checking current submissions...{C.RESET}")
+    old_id = get_latest_submission_id()
+    print(f"  {C.GREEN}OK{C.RESET}")
 
-        print(f"\n{C.BOLD}{'-' * 56}{C.RESET}")
-        print(f"  {C.CYAN}Codeforces Submit{C.RESET}")
-        print(f"    File:     {filename}")
-        print(f"    Contest:  {contest_id}")
-        print(f"    Problem:  {problem_index}")
-        print(f"    Language: {get_lang_name(lang_id)}")
-        print(f"    Lines:    {len(source_code.splitlines())}")
-        print(f"{C.BOLD}{'-' * 56}{C.RESET}")
+    # ─── Copy to clipboard ───
+    print(f"{C.CYAN}-> Copying source code to clipboard...{C.RESET}")
+    copy_to_clipboard(source_code)
+    print(f"  {C.GREEN}OK Code copied!{C.RESET}")
 
-        success = do_submit(pw, filename, contest_id, problem_index, source_code, lang_id)
+    # ─── Open submit page ───
+    submit_url = f"{CODEFORCES_URL}/contest/{contest_id}/submit/problem/{problem_index}"
+    print(f"{C.CYAN}-> Opening submit page in your browser...{C.RESET}")
+    webbrowser.open(submit_url)
 
-        if success:
-            result = poll_verdict(contest_id)
-            if result:
-                display_verdict(result)
-                sys.exit(0 if result.get("verdict") == "OK" else 1)
-            else:
-                sys.exit(1)
+    # ─── Instructions ───
+    print(f"\n  {C.BOLD}{C.YELLOW}Now in your browser:{C.RESET}")
+    print(f"  {C.BOLD}  1.{C.RESET} Select language: {C.CYAN}{lang_name}{C.RESET}")
+    print(f"  {C.BOLD}  2.{C.RESET} Click in the code editor")
+    print(f"  {C.BOLD}  3.{C.RESET} Press {C.BOLD}Ctrl+A{C.RESET} then {C.BOLD}Ctrl+V{C.RESET} to paste your code")
+    print(f"  {C.BOLD}  4.{C.RESET} Click {C.BOLD}Submit{C.RESET}")
+
+    # ─── Poll for verdict ───
+    result = poll_verdict(contest_id, old_id)
+
+    if result:
+        display_verdict(result)
+        sys.exit(0 if result.get("verdict") == "OK" else 1)
+    else:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

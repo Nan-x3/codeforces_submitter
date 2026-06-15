@@ -5,6 +5,7 @@ __pycache__/
 # Codeforces tools
 cookies.json
 cf_session.json
+.cf_browser_profile/
 tests/
 .cf/
 
