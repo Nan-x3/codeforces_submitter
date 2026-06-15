@@ -74,141 +74,58 @@ def get_lang_id(filename):
 
 # ─── SESSION ─────────────────────────────────────────────────────────────────
 
-def get_opera_gx_cookies():
-    """Read cookies directly from Opera GX's SQLite database."""
-    import sqlite3
-    import shutil
-    import tempfile
-    import json
-    import base64
-
-    cookie_path = os.path.join(
-        os.environ["APPDATA"],
-        "Opera Software", "Opera GX Stable", "Default", "Network", "Cookies"
-    )
-
-    if not os.path.exists(cookie_path):
-        raise FileNotFoundError(f"Cookie DB not found: {cookie_path}")
-
-    # Read the encryption key from Local State
-    local_state_path = os.path.join(
-        os.environ["APPDATA"],
-        "Opera Software", "Opera GX Stable", "Local State"
-    )
-
-    enc_key = None
-    if os.path.exists(local_state_path):
-        with open(local_state_path, "r", encoding="utf-8") as f:
-            local_state = json.load(f)
-        key_b64 = local_state.get("os_crypt", {}).get("encrypted_key", "")
-        if key_b64:
-            import ctypes
-            encrypted_key = base64.b64decode(key_b64)[5:]  # strip DPAPI prefix
-            # Decrypt with DPAPI
-            class DATA_BLOB(ctypes.Structure):
-                _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_char))]
-            blob_in  = DATA_BLOB(len(encrypted_key), ctypes.cast(ctypes.c_char_p(encrypted_key), ctypes.POINTER(ctypes.c_char)))
-            blob_out = DATA_BLOB()
-            ctypes.windll.crypt32.CryptUnprotectData(
-                ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
-            )
-            enc_key = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-
-    def decrypt_value(encrypted_value):
-        if not encrypted_value:
-            return ""
-        # v10/v20 AES-GCM encrypted
-        if encrypted_value[:3] in (b"v10", b"v20"):
-            if enc_key is None:
-                return ""
-            try:
-                from Cryptodome.Cipher import AES
-                iv  = encrypted_value[3:15]
-                ct  = encrypted_value[15:-16]
-                tag = encrypted_value[-16:]
-                cipher = AES.new(enc_key, AES.MODE_GCM, nonce=iv)
-                return cipher.decrypt_and_verify(ct, tag).decode("utf-8", errors="replace")
-            except Exception:
-                return ""
-        else:
-            # Old DPAPI-encrypted value
-            try:
-                import ctypes
-                class DATA_BLOB(ctypes.Structure):
-                    _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_char))]
-                blob_in  = DATA_BLOB(len(encrypted_value), ctypes.cast(ctypes.c_char_p(encrypted_value), ctypes.POINTER(ctypes.c_char)))
-                blob_out = DATA_BLOB()
-                ctypes.windll.crypt32.CryptUnprotectData(
-                    ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
-                )
-                return ctypes.string_at(blob_out.pbData, blob_out.cbData).decode("utf-8", errors="replace")
-            except Exception:
-                return ""
-
-    # Copy to temp (DB may be locked by Opera GX)
-    tmp = tempfile.mktemp(suffix=".sqlite")
-    shutil.copy2(cookie_path, tmp)
+def build_session():
+    """
+    Build a requests session using cookies from any installed browser.
+    Universal solution: works on Windows, macOS, and Linux.
+    """
+    print(f"{C.CYAN}-> Reading browser cookies...{C.RESET}")
 
     cookies = {}
-    try:
-        con = sqlite3.connect(tmp)
-        cur = con.cursor()
-        cur.execute("""
-            SELECT name, encrypted_value, value, host_key
-            FROM cookies
-            WHERE host_key LIKE '%codeforces.com%'
-        """)
-        for name, encrypted_value, value, host in cur.fetchall():
-            decrypted = decrypt_value(encrypted_value) if encrypted_value else value
-            if decrypted:
-                cookies[name] = decrypted
-        con.close()
-    finally:
+
+    # Define browsers and their custom paths if needed
+    browsers = [
+        ("Chrome", browser_cookie3.chrome, {}),
+        ("Edge", browser_cookie3.edge, {}),
+        ("Firefox", browser_cookie3.firefox, {}),
+        ("Brave", browser_cookie3.brave, {}),
+        ("Opera", browser_cookie3.opera, {}),
+    ]
+
+    # Opera GX has a non-standard path on Windows, so we help it out
+    if os.name == "nt":
+        opera_gx_cookie = os.path.join(os.environ.get("APPDATA", ""), "Opera Software", "Opera GX Stable", "Default", "Network", "Cookies")
+        opera_gx_key = os.path.join(os.environ.get("APPDATA", ""), "Opera Software", "Opera GX Stable", "Local State")
+        if os.path.exists(opera_gx_cookie) and os.path.exists(opera_gx_key):
+            browsers.insert(0, ("Opera GX", browser_cookie3.opera_gx, {"cookie_file": opera_gx_cookie, "key_file": opera_gx_key}))
+    else:
+        browsers.insert(0, ("Opera GX", browser_cookie3.opera_gx, {}))
+
+    lock_errors = []
+
+    for name, fn, kwargs in browsers:
         try:
-            os.remove(tmp)
+            jar = fn(domain_name="codeforces.com", **kwargs)
+            for c in jar:
+                cookies[c.name] = c.value
+            if cookies:
+                print(f"  {C.GREEN}OK Found Codeforces cookies in {name}{C.RESET}")
+                break
+        except PermissionError as e:
+            lock_errors.append(name)
         except Exception:
             pass
 
-    return cookies
-
-
-def build_session():
-    """Build a requests session using Opera GX's live Codeforces cookies."""
-    print(f"{C.CYAN}-> Reading cookies from Opera GX...{C.RESET}")
-
-    cookies = {}
-    error = None
-
-    try:
-        cookies = get_opera_gx_cookies()
-    except Exception as e:
-        error = str(e)
-
     if not cookies:
-        # Fallback: try browser_cookie3 for other browsers
-        for name, fn in [
-            ("Chrome",  browser_cookie3.chrome),
-            ("Edge",    browser_cookie3.edge),
-            ("Firefox", browser_cookie3.firefox),
-        ]:
-            try:
-                jar = fn(domain_name="codeforces.com")
-                for c in jar:
-                    cookies[c.name] = c.value
-                if cookies:
-                    print(f"  {C.DIM}(Using {name} cookies){C.RESET}")
-                    break
-            except Exception:
-                pass
-
-    if not cookies:
-        print(f"{C.RED}X Could not read Opera GX cookies.{C.RESET}")
-        if error:
-            print(f"  {C.DIM}{error}{C.RESET}")
-        print(f"  Make sure you are logged into Codeforces in Opera GX.")
+        print(f"{C.RED}X Could not read Codeforces cookies.{C.RESET}")
+        if lock_errors:
+            print(f"  {C.YELLOW}! The following browsers are currently locking their cookie files:{C.RESET}")
+            for b in lock_errors:
+                print(f"      - {b}")
+            print(f"\n  {C.CYAN}Fix: Please close your browser completely, then try submitting again.{C.RESET}")
+        else:
+            print(f"  Make sure you are logged into Codeforces in your browser (Chrome, Edge, Firefox, etc).")
         sys.exit(1)
-
-    print(f"  {C.GREEN}OK Got {len(cookies)} cookies from Opera GX{C.RESET}")
 
     session = requests.Session()
     for name, value in cookies.items():
@@ -218,7 +135,7 @@ def build_session():
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/137.0.0.0 Safari/537.36 OPR/123.0.0.0"
+            "Chrome/137.0.0.0 Safari/537.36"
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
@@ -227,6 +144,9 @@ def build_session():
         "Upgrade-Insecure-Requests": "1",
     })
     return session
+
+
+
 
 
 def get_csrf(session, url):
