@@ -81,7 +81,8 @@ def build_session():
     """
     print(f"{C.CYAN}-> Reading browser cookies...{C.RESET}")
 
-    cookies = {}
+    session = requests.Session()
+    found_cookies = False
 
     # Define browsers and their custom paths if needed
     browsers = [
@@ -106,9 +107,9 @@ def build_session():
     for name, fn, kwargs in browsers:
         try:
             jar = fn(domain_name="codeforces.com", **kwargs)
-            for c in jar:
-                cookies[c.name] = c.value
-            if cookies:
+            if jar and len(jar) > 0:
+                session.cookies.update(jar)
+                found_cookies = True
                 print(f"  {C.GREEN}OK Found Codeforces cookies in {name}{C.RESET}")
                 break
         except PermissionError as e:
@@ -116,7 +117,7 @@ def build_session():
         except Exception:
             pass
 
-    if not cookies:
+    if not found_cookies:
         print(f"{C.RED}X Could not read Codeforces cookies.{C.RESET}")
         if lock_errors:
             print(f"  {C.YELLOW}! The following browsers are currently locking their cookie files:{C.RESET}")
@@ -126,10 +127,6 @@ def build_session():
         else:
             print(f"  Make sure you are logged into Codeforces in your browser (Chrome, Edge, Firefox, etc).")
         sys.exit(1)
-
-    session = requests.Session()
-    for name, value in cookies.items():
-        session.cookies.set(name, value, domain=".codeforces.com")
 
     session.headers.update({
         "User-Agent": (
@@ -185,7 +182,7 @@ def get_csrf(session, url):
 # ─── SUBMIT ──────────────────────────────────────────────────────────────────
 
 def do_submit(session, contest_id, problem_index, source_code, lang_id):
-    submit_url = f"{CODEFORCES_URL}/contest/{contest_id}/submit/{problem_index}"
+    submit_url = f"{CODEFORCES_URL}/contest/{contest_id}/submit"
 
     print(f"{C.CYAN}-> Fetching submit page...{C.RESET}")
     csrf, _ = get_csrf(session, submit_url)
