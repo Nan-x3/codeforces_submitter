@@ -132,11 +132,11 @@ def build_session():
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/137.0.0.0 Safari/537.36"
+            "Chrome/137.0.0.0 Safari/537.36 OPR/123.0.0.0"
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
     })
@@ -147,31 +147,37 @@ def build_session():
 
 
 def get_csrf(session, url):
-    """Fetch a CSRF token from a Codeforces page."""
-    resp = session.get(url, timeout=20)
-
-    if resp.status_code == 403:
-        print(f"{C.RED}X Codeforces returned 403 Forbidden.{C.RESET}")
-        print(f"  Your Opera GX cf_clearance cookie may be stale.")
-        print(f"  Open codeforces.com in Opera GX, browse around, then try again.")
+    """Fetch a URL and extract the Codeforces CSRF token."""
+    try:
+        resp = session.get(url, timeout=15)
+    except Exception as e:
+        print(f"{C.RED}X Connection error: {e}{C.RESET}")
         sys.exit(1)
 
+    if resp.status_code == 403:
+        print(f"{C.RED}X Blocked by Cloudflare (HTTP 403).{C.RESET}")
+        print(f"  Try logging in again or submitting from the browser once to clear the CAPTCHA.")
+        sys.exit(1)
     if resp.status_code != 200:
-        print(f"{C.RED}X HTTP {resp.status_code} from {url}{C.RESET}")
+        print(f"{C.RED}X Failed to fetch {url} (HTTP {resp.status_code}){C.RESET}")
         sys.exit(1)
 
     for pattern in [
+        r'name="X-Csrf-Token"\s+content="([a-f0-9]+)"',
         r"csrf='([a-f0-9]+)'",
         r'name="csrf_token"\s+value="([a-f0-9]+)"',
         r'data-csrf="([a-f0-9]+)"',
     ]:
-        m = re.search(pattern, resp.text)
+        m = re.search(pattern, resp.text, re.IGNORECASE)
         if m:
             return m.group(1), resp
 
     # Check if we're actually logged in
     if HANDLE.lower() not in resp.text.lower():
         print(f"{C.RED}X Not logged in on Codeforces.{C.RESET}")
+        with open("debug_cf.html", "w", encoding="utf-8") as f:
+            f.write(resp.text)
+        print(f"  {C.DIM}(Saved debug_cf.html for diagnosis){C.RESET}")
         print(f"  Open Opera GX, go to codeforces.com, log in, then try again.")
         sys.exit(1)
 
