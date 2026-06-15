@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 
+# Solution files (keep these local, don't push)
+[0-9]*[A-Z]*.py
+[0-9]*[a-z]*.py
+
 # Codeforces tools
 cookies.json
 cf_session.json
