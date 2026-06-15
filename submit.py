@@ -182,18 +182,18 @@ def get_csrf(session, url):
 # ─── SUBMIT ──────────────────────────────────────────────────────────────────
 
 def do_submit(session, contest_id, problem_index, source_code, lang_id):
-    submit_url = f"{CODEFORCES_URL}/contest/{contest_id}/submit"
+    submit_url = f"{CODEFORCES_URL}/problemset/submit"
+    problem_code = f"{contest_id}{problem_index}"
 
     print(f"{C.CYAN}-> Fetching submit page...{C.RESET}")
     csrf, _ = get_csrf(session, submit_url)
     print(f"  {C.GREEN}OK Got CSRF token{C.RESET}")
 
-    print(f"{C.CYAN}-> Submitting...{C.RESET}")
+    print(f"{C.CYAN}-> Submitting {problem_code}...{C.RESET}")
     data = {
         "csrf_token":            csrf,
         "action":                "submitSolutionFormSubmitted",
-        "contestId":             contest_id,
-        "submittedProblemIndex": problem_index,
+        "submittedProblemCode":  problem_code,
         "programTypeId":         str(lang_id),
         "source":                source_code,
         "tabSize":               "4",
