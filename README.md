@@ -4,25 +4,24 @@ A Python CLI tool for submitting solutions to [Codeforces](https://codeforces.co
 
 ## Features
 
-- **Submit solutions** from the command line
-- **Bypasses Cloudflare** using a real browser (Playwright's bundled Chromium)
-- **Auto-detects** contest ID and problem index from filename
-- **Polls verdicts** in real-time and displays results with timing/memory stats
-- **Session persistence** — log in once, submit many times
-- **Works on any OS** — Windows, macOS, Linux
+- **Submit solutions** from the command line with a single command
+- **Auto-detects cookies** from your browser — no manual setup
+- **Supports Opera GX, Chrome, Edge, Firefox** — uses whichever you're logged into
+- **Polls verdicts** in real-time with timing and memory stats
+- **Works on any Windows PC** — just clone, install deps, and run
+
+## Requirements
+
+- Python 3.8+
+- One of: **Opera GX**, Chrome, Edge, or Firefox — logged into Codeforces
 
 ## Setup
 
 ```bash
-# Install dependencies
-pip install playwright
-
-# Install the bundled Chromium browser (~180MB one-time download)
-python -m playwright install chromium
-
-# Log in to Codeforces (opens a browser window)
-py submit.py --login
+pip install requests browser-cookie3 pycryptodomex
 ```
+
+That's it. No login command, no config file. Just make sure you're logged into Codeforces in your browser.
 
 ## Usage
 
