@@ -206,11 +206,16 @@ def submit_solution(filename):
         pyautogui.typewrite(lang_name[:5], interval=0.05)
         time.sleep(0.2)
         
-    # 4. Tab past "Choose File" to reach the Source Code textarea
-    pyautogui.press('tab', presses=2, interval=0.2)
+    # 4. Tab to reach the Source Code textarea 
+    # (CodeMirror traps the Tab key, so we can safely overshoot the number of tabs to guarantee we reach it)
+    pyautogui.press('tab', presses=4, interval=0.1)
     time.sleep(0.2)
     
-    # 5. Paste the code
+    # 5. Clear any stray tabs/characters that were typed into the editor, then Paste
+    pyautogui.hotkey('ctrl', 'a')
+    time.sleep(0.1)
+    pyautogui.press('backspace')
+    time.sleep(0.1)
     pyautogui.hotkey('ctrl', 'v')
     print(f"  {C.GREEN}OK Code pasted!{C.RESET}")
     
