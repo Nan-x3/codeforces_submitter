@@ -2,18 +2,18 @@
 """
 Codeforces Submit Tool
 ======================
-Automated CLI submission tool for Codeforces.
+Automated CLI submission tool for Codeforces using native GUI automation.
 
 Workflow:
-  1. Open browser to Codeforces submit page
-  2. Check if logged in (user logs in if needed)
-  3. Auto-fill problem code, language, and code
-  4. User completes CAPTCHA manually (for safety)
-  5. Auto-click Submit
-
-Usage:
-  py submit.py 112A.py          Submit solution
-  py submit.py --help           Show help
+  1. Load or prompt for user's Codeforces handle.
+  2. Query Codeforces API for baseline submission ID.
+  3. Copy source code to clipboard.
+  4. Open default browser to Codeforces submit page.
+  5. Wait for page to load.
+  6. Auto-fill problem code, language, and paste code via PyAutoGUI.
+  7. Wait in background for a new submission on the API.
+  8. Once detected (meaning user clicked submit), send Ctrl+W to close tab.
+  9. Poll API until verdict is complete and display results.
 """
 
 import sys
@@ -21,17 +21,10 @@ import os
 import re
 import subprocess
 import time
-from pathlib import Path
-
-# Try to import Playwright
-try:
-    from playwright.sync_api import sync_playwright, expect
-except ImportError:
-    print("Installing playwright...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "playwright", "pyautogui"])
-    # Also install browser binaries
-    subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
-    from playwright.sync_api import sync_playwright, expect
+import webbrowser
+import json
+import urllib.request
+import urllib.error
 
 try:
     import pyautogui
@@ -40,6 +33,7 @@ except ImportError:
     import pyautogui
 
 CODEFORCES_URL = "https://codeforces.com/problemset/submit"
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 
 LANG_MAP = {
     ".py": "70",    # PyPy 3-64
@@ -66,6 +60,50 @@ class C:
     RESET = "\033[0m"
 
 
+def get_handle():
+    """Load handle from config or prompt the user."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                data = json.load(f)
+                if "handle" in data:
+                    return data["handle"]
+        except Exception:
+            pass
+
+    print(f"\n{C.CYAN}First time setup!{C.RESET}")
+    handle = input(f"Enter your Codeforces handle: ").strip()
+    if not handle:
+        print(f"{C.RED}X Handle cannot be empty.{C.RESET}")
+        sys.exit(1)
+        
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({"handle": handle}, f)
+        print(f"  {C.GREEN}OK Saved to {CONFIG_FILE}{C.RESET}\n")
+    except Exception as e:
+        print(f"{C.YELLOW}! Could not save config: {e}{C.RESET}\n")
+        
+    return handle
+
+
+def api_get_latest_submission(handle):
+    """Fetch the latest submission from the Codeforces API."""
+    url = f"https://codeforces.com/api/user.status?handle={handle}&from=1&count=1"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        resp = urllib.request.urlopen(req, timeout=5).read().decode('utf-8')
+        data = json.loads(resp)
+        if data.get("status") == "OK" and data.get("result"):
+            return data["result"][0]
+        return None
+    except urllib.error.HTTPError as e:
+        # 400 Bad Request usually means the handle doesn't exist or has 0 submissions
+        return None
+    except Exception:
+        return None
+
+
 def parse_filename(filename):
     """Extract contest ID and problem index from filename."""
     basename = os.path.splitext(os.path.basename(filename))[0]
@@ -88,43 +126,35 @@ def get_lang_id(filename):
 
 
 def copy_to_clipboard(text):
-    """Copy text to system clipboard."""
+    """Copy text to system clipboard preserving newlines and unicode."""
+    import base64
     try:
-        p = subprocess.Popen(
-            ["powershell", "-Command", "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetText($input)"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        p.communicate(input=text.encode("utf-8"), timeout=5)
+        b64 = base64.b64encode(text.encode('utf-8')).decode('utf-8')
+        ps_cmd = f"$bytes = [Convert]::FromBase64String('{b64}'); $text = [Text.Encoding]::UTF8.GetString($bytes); Set-Clipboard -Value $text"
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=True, timeout=5)
         return True
     except Exception:
+        # Fallback to clip.exe
         try:
-            p = subprocess.Popen(["clip"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p = subprocess.Popen(["clip"], stdin=subprocess.PIPE)
             p.communicate(input=text.encode("utf-8"), timeout=5)
             return p.returncode == 0
         except Exception:
             return False
 
 
-def is_logged_in(page):
-    """Check if user is logged into Codeforces."""
-    try:
-        # Look for logout link (present only if logged in)
-        logout_link = page.query_selector('a[href*="logout"]')
-        return logout_link is not None
-    except Exception:
-        return False
-
-
 def submit_solution(filename):
-    """Submit a solution using Playwright."""
+    """Submit a solution using Native GUI automation."""
+    handle = get_handle()
+    
     if not os.path.exists(filename):
         print(f"{C.RED}X File not found: {filename}{C.RESET}")
         sys.exit(1)
 
     contest_id, problem_index = parse_filename(filename)
     lang_id = get_lang_id(filename)
+    problem_code = f"{contest_id}{problem_index}"
+    lang_name = LANG_NAMES.get(lang_id, "")
 
     with open(filename, "r", encoding="utf-8") as f:
         source_code = f.read()
@@ -135,116 +165,107 @@ def submit_solution(filename):
 
     print(f"\n{C.BOLD}{'-' * 60}{C.RESET}")
     print(f"  {C.CYAN}Codeforces Submit{C.RESET}")
+    print(f"    User:     {handle}")
     print(f"    File:     {filename}")
-    print(f"    Contest:  {contest_id}")
-    print(f"    Problem:  {problem_index}")
-    print(f"    Language: {LANG_NAMES.get(lang_id, '?')}")
+    print(f"    Problem:  {problem_code}")
+    print(f"    Language: {lang_name}")
     print(f"    Lines:    {len(source_code.splitlines())}")
     print(f"{C.BOLD}{'-' * 60}{C.RESET}\n")
 
-    print(f"{C.CYAN}-> Opening Codeforces...{C.RESET}")
+    # Get baseline submission ID to detect when a new one appears
+    print(f"{C.CYAN}-> Checking API baseline...{C.RESET}")
+    baseline_sub = api_get_latest_submission(handle)
+    baseline_id = baseline_sub["id"] if baseline_sub else 0
 
-    with sync_playwright() as p:
-        # Try to open with Opera GX first (user's default), fall back to Chromium
-        browser = None
-        try:
-            # Try Opera GX
-            browser = p.chromium.launch(headless=False, channel="opera")
-        except Exception:
-            try:
-                # Fall back to Chromium
-                browser = p.chromium.launch(headless=False)
-            except Exception as e:
-                print(f"{C.RED}X Could not launch browser: {e}{C.RESET}")
-                sys.exit(1)
+    print(f"{C.CYAN}-> Copying code to clipboard...{C.RESET}")
+    if not copy_to_clipboard(source_code):
+        print(f"  {C.RED}X Could not copy to clipboard{C.RESET}")
+        sys.exit(1)
+    print(f"  {C.GREEN}OK Code copied ({len(source_code)} bytes){C.RESET}")
+
+    print(f"{C.CYAN}-> Opening default browser...{C.RESET}")
+    webbrowser.open(CODEFORCES_URL)
+    
+    print(f"  {C.YELLOW}Wait 4 seconds for page to load. DO NOT touch the mouse or keyboard!{C.RESET}")
+    for i in range(4, 0, -1):
+        print(f"  {i}...")
+        time.sleep(1)
+
+    print(f"{C.CYAN}-> Auto-filling form...{C.RESET}")
+    
+    # 1. Type problem code (cursor is automatically here when page loads)
+    pyautogui.typewrite(problem_code, interval=0.05)
+    time.sleep(0.2)
+    
+    # 2. Tab to Language selector
+    pyautogui.press('tab')
+    time.sleep(0.2)
+    
+    # 3. Type language to select it in the dropdown
+    if lang_name:
+        pyautogui.typewrite(lang_name[:5], interval=0.05)
+        time.sleep(0.2)
         
-        context = browser.new_context()
-        page = context.new_page()
-        page.set_default_timeout(30000)
+    # 4. Tab past "Choose File" to reach the Source Code textarea
+    pyautogui.press('tab', presses=2, interval=0.2)
+    time.sleep(0.2)
+    
+    # 5. Paste the code
+    pyautogui.hotkey('ctrl', 'v')
+    print(f"  {C.GREEN}OK Code pasted!{C.RESET}")
+    
+    print(f"\n{C.YELLOW}IMPORTANT: Complete the CAPTCHA and click SUBMIT manually.{C.RESET}")
+    print(f"{C.CYAN}-> Waiting for you to submit...{C.RESET}")
+    
+    # Wait for the user to submit
+    new_sub = None
+    while True:
+        time.sleep(2)
+        latest = api_get_latest_submission(handle)
+        if latest and latest["id"] > baseline_id:
+            new_sub = latest
+            break
 
-        try:
-            # Navigate to submit page
-            page.goto(CODEFORCES_URL)
-            print(f"  {C.GREEN}OK Page loaded{C.RESET}")
-
-            # Check if logged in
-            time.sleep(2)
-            if not is_logged_in(page):
-                print(f"{C.YELLOW}! Not logged in to Codeforces.{C.RESET}")
-                input(f"  {C.CYAN}Please log in in the browser, then press Enter...{C.RESET}")
-                time.sleep(1)
-
-            # Fill contest and problem code
-            print(f"{C.CYAN}-> Filling form...{C.RESET}")
+    # Detect the submit and close the tab!
+    print(f"  {C.GREEN}OK Submission detected! Closing browser tab...{C.RESET}")
+    pyautogui.hotkey('ctrl', 'w')
+    
+    print(f"\n{C.BOLD}--- Live Verdict ---{C.RESET}")
+    
+    # Poll for verdict
+    last_msg = ""
+    while True:
+        verdict = new_sub.get("verdict")
+        if verdict and verdict != "TESTING":
+            break
             
-            # Find the problem code field
-            problem_code = f"{contest_id}{problem_index}"
-            problem_input = page.query_selector('input[name="submittedProblemCode"]')
-            if problem_input:
-                problem_input.fill(problem_code)
-                print(f"  {C.GREEN}OK Problem: {problem_code}{C.RESET}")
-            else:
-                print(f"  {C.YELLOW}! Could not find problem code field{C.RESET}")
-
-            # Select language
-            lang_select = page.query_selector('select[name="programTypeId"]')
-            if lang_select:
-                lang_select.select_option(lang_id)
-                print(f"  {C.GREEN}OK Language: {LANG_NAMES.get(lang_id, lang_id)}{C.RESET}")
-            else:
-                print(f"  {C.YELLOW}! Could not find language selector{C.RESET}")
-
-            # Fill source code using clipboard (safer than PyAutoGUI typing)
-            print(f"{C.CYAN}-> Pasting code...{C.RESET}")
-            if copy_to_clipboard(source_code):
-                source_textarea = page.query_selector('textarea[name="source"]')
-                if source_textarea:
-                    source_textarea.click()
-                    time.sleep(0.5)
-                    page.keyboard.press("Control+A")
-                    page.keyboard.press("Control+V")
-                    time.sleep(1)
-                    print(f"  {C.GREEN}OK Code pasted ({len(source_code)} bytes){C.RESET}")
-                else:
-                    print(f"  {C.RED}X Could not find source code textarea{C.RESET}")
-                    sys.exit(1)
-            else:
-                print(f"  {C.RED}X Could not copy to clipboard{C.RESET}")
-                sys.exit(1)
-
-            # Wait for user to complete CAPTCHA
-            print(f"\n{C.YELLOW}IMPORTANT: Complete the CAPTCHA verification manually in the browser.{C.RESET}")
-            input(f"  {C.CYAN}Press Enter when you've completed the CAPTCHA...{C.RESET}\n")
-
-            # Click Submit button
-            print(f"{C.CYAN}-> Clicking Submit...{C.RESET}")
-            submit_button = page.query_selector('button:has-text("Submit")')
-            if not submit_button:
-                submit_button = page.query_selector('input[type="submit"]')
+        passedTestCount = new_sub.get("passedTestCount", 0)
+        msg = f"  Running on test {passedTestCount + 1}..."
+        
+        if msg != last_msg:
+            print(msg)
+            last_msg = msg
             
-            if submit_button:
-                submit_button.click()
-                print(f"  {C.GREEN}OK Submitted!{C.RESET}")
-                time.sleep(2)
-                
-                # Wait for submission to process
-                try:
-                    page.wait_for_url("**/contest/**", timeout=10000)
-                    print(f"  {C.GREEN}OK Submission accepted!{C.RESET}")
-                except Exception:
-                    print(f"  {C.YELLOW}! Submission processing...{C.RESET}")
-            else:
-                print(f"  {C.RED}X Could not find Submit button{C.RESET}")
-                sys.exit(1)
+        time.sleep(2)
+        latest = api_get_latest_submission(handle)
+        if latest and latest["id"] == new_sub["id"]:
+            new_sub = latest
 
-            print(f"\n{C.GREEN}Done!{C.RESET}")
-            print(f"  Check your submissions: https://codeforces.com/submissions/")
-
-        except Exception as e:
-            print(f"{C.RED}X Error: {e}{C.RESET}")
-            sys.exit(1)
-        finally:
-            browser.close()
+    # Final verdict
+    verdict = new_sub.get("verdict")
+    time_ms = new_sub.get("timeConsumedMillis", 0)
+    mem_kb = new_sub.get("memoryConsumedBytes", 0) // 1024
+    
+    if verdict == "OK":
+        print(f"\n  {C.GREEN}{C.BOLD}✅ ACCEPTED{C.RESET} ({time_ms}ms, {mem_kb}KB)")
+    elif verdict == "WRONG_ANSWER":
+        print(f"\n  {C.RED}{C.BOLD}❌ WRONG ANSWER{C.RESET} on test {new_sub.get('passedTestCount', 0) + 1} ({time_ms}ms, {mem_kb}KB)")
+    elif verdict == "TIME_LIMIT_EXCEEDED":
+        print(f"\n  {C.YELLOW}{C.BOLD}⏱️ TIME LIMIT EXCEEDED{C.RESET} on test {new_sub.get('passedTestCount', 0) + 1} ({time_ms}ms, {mem_kb}KB)")
+    elif verdict == "COMPILATION_ERROR":
+        print(f"\n  {C.YELLOW}{C.BOLD}⚠️ COMPILATION ERROR{C.RESET}")
+    else:
+        print(f"\n  {C.YELLOW}{C.BOLD}⚠️ {verdict}{C.RESET} on test {new_sub.get('passedTestCount', 0) + 1} ({time_ms}ms, {mem_kb}KB)")
 
 
 def main():
