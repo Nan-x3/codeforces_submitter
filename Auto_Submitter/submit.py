@@ -145,8 +145,19 @@ def submit_solution(filename):
     print(f"{C.CYAN}-> Opening Codeforces...{C.RESET}")
 
     with sync_playwright() as p:
-        # Open browser
-        browser = p.chromium.launch(headless=False)
+        # Try to open with Opera GX first (user's default), fall back to Chromium
+        browser = None
+        try:
+            # Try Opera GX
+            browser = p.chromium.launch(headless=False, channel="opera")
+        except Exception:
+            try:
+                # Fall back to Chromium
+                browser = p.chromium.launch(headless=False)
+            except Exception as e:
+                print(f"{C.RED}X Could not launch browser: {e}{C.RESET}")
+                sys.exit(1)
+        
         context = browser.new_context()
         page = context.new_page()
         page.set_default_timeout(30000)
