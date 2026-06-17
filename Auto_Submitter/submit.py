@@ -186,10 +186,35 @@ def submit_solution(filename):
     print(f"{C.CYAN}-> Opening default browser...{C.RESET}")
     webbrowser.open(CODEFORCES_URL)
     
-    print(f"  {C.YELLOW}Wait 4 seconds for page to load. DO NOT touch the mouse or keyboard!{C.RESET}")
-    for i in range(4, 0, -1):
-        print(f"  {i}...")
-        time.sleep(1)
+    print(f"  {C.YELLOW}Waiting for page to load (detecting window title)... DO NOT touch the mouse/keyboard!{C.RESET}")
+    
+    # Smart wait: observe the active window title to know when Codeforces is actually loaded
+    import ctypes
+    timeout = 20
+    start_time = time.time()
+    page_loaded = False
+    
+    while time.time() - start_time < timeout:
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value if buf.value else ""
+            
+            # Codeforces submit page title is usually "Submit Code - Codeforces"
+            if "Submit Code" in title:
+                page_loaded = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    if not page_loaded:
+        print(f"  {C.YELLOW}! Could not detect page load after 20s, attempting to type anyway...{C.RESET}")
+    
+    # Wait 1.5 extra seconds for the DOM to fully render and the cursor to auto-focus into the box
+    time.sleep(1.5)
 
     print(f"{C.CYAN}-> Auto-filling form...{C.RESET}")
     
